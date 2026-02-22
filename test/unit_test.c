@@ -690,6 +690,88 @@ static void test_rpc(void) {
   ASSERT(strcmp(buf, res) == 0);
 }
 
+static void test_rpc_batch(void) {
+  const char *req, *res;
+  char buf[1024];
+  struct mjson_fixedbuf fb = {buf, sizeof(buf), 0};
+
+  // Batch with two regular calls
+  req = "[{\"id\":1,\"method\":\"foo\",\"params\":[0,1.23]},"
+        "{\"id\":2,\"method\":\"foo\",\"params\":[0,4.56]}]";
+  res = "[{\"id\":1,\"result\":{\"x\":1.23,\"ud\":\"hi\"}},"
+        "{\"id\":2,\"result\":{\"x\":4.56,\"ud\":\"hi\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb,
+                  (void *) "hi");
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with a single call
+  req = "[{\"id\":10,\"method\":\"foo\",\"params\":[0,9.99]}]";
+  res = "[{\"id\":10,\"result\":{\"x\":9.99,\"ud\":\"hi\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb,
+                  (void *) "hi");
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with a notification (no id) - should not appear in response
+  req = "[{\"id\":1,\"method\":\"foo\",\"params\":[0,1.0]},"
+        "{\"method\":\"foo\",\"params\":[0,2.0]},"
+        "{\"id\":3,\"method\":\"foo\",\"params\":[0,3.0]}]";
+  res = "[{\"id\":1,\"result\":{\"x\":1,\"ud\":\"hi\"}},"
+        "{\"id\":3,\"result\":{\"x\":3,\"ud\":\"hi\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb,
+                  (void *) "hi");
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with all notifications - no response at all
+  req = "[{\"method\":\"foo\",\"params\":[0,1.0]},"
+        "{\"method\":\"foo\",\"params\":[0,2.0]}]";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb, NULL);
+  ASSERT(fb.len == 0);
+
+  // Empty array - Invalid Request
+  req = "[]";
+  res = "{\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb, NULL);
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with invalid elements (non-objects)
+  req = "[1,2,3]";
+  res = "[{\"error\":{\"code\":-32700,\"message\":\"1\"}},"
+        "{\"error\":{\"code\":-32700,\"message\":\"2\"}},"
+        "{\"error\":{\"code\":-32700,\"message\":\"3\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb, NULL);
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with mix of valid and invalid elements
+  req = "[{\"id\":1,\"method\":\"foo\",\"params\":[0,7.0]},42]";
+  res = "[{\"id\":1,\"result\":{\"x\":7,\"ud\":\"hi\"}},"
+        "{\"error\":{\"code\":-32700,\"message\":\"42\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb,
+                  (void *) "hi");
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with unknown method
+  req = "[{\"id\":1,\"method\":\"nonexistent\"}]";
+  res = "[{\"id\":1,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb, NULL);
+  ASSERT(strcmp(buf, res) == 0);
+
+  // Batch with leading whitespace
+  req = "  [{\"id\":1,\"method\":\"foo\",\"params\":[0,5.0]}]";
+  res = "[{\"id\":1,\"result\":{\"x\":5,\"ud\":\"hi\"}}]\n";
+  fb.len = 0;
+  jsonrpc_process(req, (int) strlen(req), mjson_print_fixed_buf, &fb,
+                  (void *) "hi");
+  ASSERT(strcmp(buf, res) == 0);
+}
+
 static void test_merge(void) {
   char buf[512];
   size_t i;
@@ -883,6 +965,7 @@ int main() {
   test_get_string();
   test_print();
   test_rpc();
+  test_rpc_batch();
   test_merge();
   test_pretty();
   test_globmatch();

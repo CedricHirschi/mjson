@@ -563,8 +563,8 @@ int mjson_print_dbl(mjson_print_fn_t fn, void *fnd, double d, int width) {
   int i, s = 0, n = 0, e = 0;
   double t, mul, saved;
   if (d == 0.0) return fn("0", 1, fnd);
-  if (isinf(d)) return fn(d > 0 ? "inf" : "-inf", d > 0 ? 3 : 4, fnd);
-  if (isnan(d)) return fn("nan", 3, fnd);
+  if (isinf((float)d)) return fn(d > 0 ? "inf" : "-inf", d > 0 ? 3 : 4, fnd);
+  if (isnan((float)d)) return fn("nan", 3, fnd);
   if (d < 0.0) d = -d, buf[s++] = '-';
 
   // Round
@@ -995,8 +995,9 @@ void jsonrpc_return_success(struct jsonrpc_request *r, const char *result_fmt,
   va_end(ap);
 }
 
-void jsonrpc_ctx_process(struct jsonrpc_ctx *ctx, const char *buf, int len,
-                         mjson_print_fn_t fn, void *fn_data, void *ud) {
+static void jsonrpc_ctx_process_single(struct jsonrpc_ctx *ctx, const char *buf,
+                                       int len, mjson_print_fn_t fn,
+                                       void *fn_data, void *ud) {
   const char *result = NULL, *error = NULL;
   int result_sz = 0, error_sz = 0;
   struct jsonrpc_method *m = NULL;
@@ -1033,6 +1034,64 @@ void jsonrpc_ctx_process(struct jsonrpc_ctx *ctx, const char *buf, int len,
   if (m == NULL) {
     jsonrpc_return_error(&r, JSONRPC_ERROR_NOT_FOUND, "method not found", NULL);
   }
+}
+
+void jsonrpc_ctx_process(struct jsonrpc_ctx *ctx, const char *buf, int len,
+                         mjson_print_fn_t fn, void *fn_data, void *ud) {
+  int i;
+  for (i = 0; i < len; i++) {
+    if (buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\n' && buf[i] != '\r')
+      break;
+  }
+
+  if (i < len && buf[i] == '[') {
+    // Batch request (JSON-RPC 2.0 section 6)
+    int off = 0, koff, klen, voff, vlen, vtype, n = 0;
+    char *batch = NULL;
+
+    if (mjson(buf, len, NULL, NULL) < 0) {
+      mjson_printf(fn, fn_data,
+                   "{\"error\":{\"code\":-32700,\"message\":%.*Q}}\n", len, buf);
+      return;
+    }
+
+    // Empty array: return Invalid Request
+    if (mjson_next(buf, len, 0, &koff, &klen, &voff, &vlen, &vtype) == 0) {
+      mjson_printf(fn, fn_data,
+                   "{\"error\":{\"code\":-32600,\"message\":%Q}}\n",
+                   "Invalid Request");
+      return;
+    }
+
+    // Process each element individually
+    while ((off = mjson_next(buf, len, off, &koff, &klen, &voff, &vlen,
+                             &vtype)) != 0) {
+      char *resp = NULL;
+      jsonrpc_ctx_process_single(ctx, buf + voff, vlen,
+                                 mjson_print_dynamic_buf, &resp, ud);
+      if (resp != NULL) {
+        int rlen = (int) strlen(resp);
+        while (rlen > 0 && resp[rlen - 1] == '\n') rlen--;
+        if (rlen > 0) {
+          if (n > 0) mjson_print_buf(mjson_print_dynamic_buf, &batch, ",", 1);
+          mjson_print_buf(mjson_print_dynamic_buf, &batch, resp, rlen);
+          n++;
+        }
+        free(resp);
+      }
+    }
+
+    // If all requests were notifications, return nothing
+    if (n > 0 && batch != NULL) {
+      fn("[", 1, fn_data);
+      fn(batch, (int) strlen(batch), fn_data);
+      mjson_printf(fn, fn_data, "]\n");
+      free(batch);
+    }
+    return;
+  }
+
+  jsonrpc_ctx_process_single(ctx, buf, len, fn, fn_data, ud);
 }
 
 static int jsonrpc_print_methods(mjson_print_fn_t fn, void *fn_data,
